@@ -3,7 +3,8 @@
 # NAME         unique app name (what you type in `nova install <name>`)
 # DESCRIPTION  one line, shown in `nova list` and the GUI
 # VERSION      your own version string, shown in listings
-# TYPE         cli | gui | gnome-extension | system   (informational)
+# TYPE         cli | gui | cli+gui | gnome-extension | system  (informational;
+#              for cli+gui apps nova shows "(cli-only)" on headless machines)
 # SCOPE        user | system — must match the list the repo is added to;
 #              system apps are installed as root (/etc, root systemd, ...)
 # INSTALLER    installer script relative to repo root (default: install.sh)

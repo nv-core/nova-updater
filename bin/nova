@@ -10,7 +10,7 @@
 #   system — listed in /etc/nova-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-NOVA_VERSION="0.4.0"
+NOVA_VERSION="0.5.0"
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 # root-owned copy used for system-scope work (installed by 'install.sh --with-system');
@@ -167,6 +167,16 @@ is_installed() { # scope url
     [[ -f "$(repos_dir "$1")/$(dir_name "$2")/.nova-installed" ]]
 }
 
+# marker records the installed commit plus whether GUI parts were installed
+# (NOVA_GUI decision at install time) — so listings show the per-machine truth
+write_marker() { # repo_dir
+    { local_head "$1"; echo "gui=$(gui_available)"; } > "$1/.nova-installed"
+}
+
+marker_gui() { # scope url -> 0 | 1 | "" (pre-0.5 markers have no flag)
+    grep -m1 '^gui=' "$(repos_dir "$1")/$(dir_name "$2")/.nova-installed" 2>/dev/null | cut -d= -f2
+}
+
 local_head() { # repo_dir
     if git -C "$1" rev-parse HEAD 2>/dev/null; then return; fi
     # fallback: read the refs by hand. git refuses repos owned by another
@@ -298,7 +308,7 @@ install_one() { # scope url opts
     [[ $mscope != "$scope" ]] && warn "$(app_name "$scope" "$url"): manifest declares SCOPE=$mscope but app is in the $scope list"
 
     run_installer "$scope" "$dir" "$action"
-    local_head "$dir" > "$dir/.nova-installed"
+    write_marker "$dir"
     info "${c_grn}$(app_name "$scope" "$url") ${action}ed${c_off} (${scope}, $(manifest_get "$dir" VERSION "?"))"
 }
 
@@ -317,7 +327,7 @@ update_one() { # scope url opts   (appends to global UPDATED array)
         return 0
     fi
     run_installer "$scope" "$dir" update
-    local_head "$dir" > "$dir/.nova-installed"
+    write_marker "$dir"
     info "${c_grn}$name updated${c_off} to $(manifest_get "$dir" VERSION "?")"
     UPDATED+=("$name")
 }
@@ -442,6 +452,10 @@ cmd_list() {
             desc="$(manifest_get "$dir" DESCRIPTION "")"
             tref=""
             if is_installed "$scope" "$url"; then
+                # cli+gui apps: show whether this machine actually got the GUI
+                if [[ $typ == *gui* && "$(marker_gui "$scope" "$url")" == 0 ]]; then
+                    typ="$typ (cli-only)"
+                fi
                 status="installed"
                 if (( check )); then
                     target="$(remote_target "$url" "$opts" || true)"

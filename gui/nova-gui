@@ -29,6 +29,7 @@ STATUS_LABEL = {
 TYPE_ICON = {
     "cli": "utilities-terminal-symbolic",
     "gui": "application-x-executable-symbolic",
+    "cli+gui": "application-x-executable-symbolic",
     "gnome-extension": "application-x-addon-symbolic",
     "system": "emblem-system-symbolic",
 }
@@ -63,11 +64,18 @@ class AppRow(Adw.ActionRow):
         self.add_prefix(self.check)
         self.set_activatable_widget(self.check)
 
-        if app["typ"] in TYPE_ICON:
-            icon = Gtk.Image.new_from_icon_name(TYPE_ICON[app["typ"]])
+        base_typ = app["typ"].split(" ")[0]        # "cli+gui (cli-only)" -> "cli+gui"
+        if base_typ in TYPE_ICON:
+            icon = Gtk.Image.new_from_icon_name(TYPE_ICON[base_typ])
             icon.set_tooltip_text(app["typ"])
             icon.add_css_class("dim-label")
             self.add_suffix(icon)
+        if "(cli-only)" in app["typ"]:
+            tag = Gtk.Label(label="cli-only")
+            tag.add_css_class("caption")
+            tag.add_css_class("dim-label")
+            tag.set_tooltip_text("GUI parts were not installed on this machine (headless)")
+            self.add_suffix(tag)
 
         if app["ver"] and app["ver"] != "-":
             ver = Gtk.Label(label=app["ver"])

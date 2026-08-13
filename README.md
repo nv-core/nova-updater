@@ -139,7 +139,7 @@ Every tool repo contains a `nova.manifest` at its root
 NAME=my-tool
 DESCRIPTION=Short description
 VERSION=0.1.0
-TYPE=cli            # cli | gui | gnome-extension | system  (informational)
+TYPE=cli+gui        # cli | gui | cli+gui | gnome-extension | system
 SCOPE=user          # user | system (system = installed as root)
 INSTALLER=install.sh
 ```
@@ -161,9 +161,14 @@ nova needs.
 ## Notes
 
 - `nova check` exits with code `10` when updates are available (script-friendly).
-- Root escalation for system apps: `sudo` in a terminal, `pkexec` from the GUI —
-  automatic, and it always executes the root-owned nova copy, never a file in
-  your home.
+- **System updates are passwordless but always all-or-nothing**: updating any
+  system app starts the root service, which runs `nova update --all --system`
+  (a polkit rule lets wheel users start that one fixed unit — your selection
+  can't be passed to root by design). Updates are idempotent, so this is safe;
+  installs/uninstalls of system apps stay per-selection with an auth prompt.
+- Root escalation for system installs/uninstalls: `sudo` in a terminal,
+  `pkexec` from the GUI — automatic, and it always executes the root-owned
+  nova copy, never a file in your home.
 - Concurrent runs are prevented with per-scope lock files.
 - The GUI is a thin layer over `nova list --porcelain` — the CLI is the single
   source of truth.
