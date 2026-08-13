@@ -10,7 +10,7 @@
 #   system — listed in /etc/nova-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-NOVA_VERSION="0.7.0"
+NOVA_VERSION="0.8.0"
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 # systemd system services start without $HOME (set -u would abort at the
@@ -444,7 +444,54 @@ dispatch() { # verb extra_flag
     if [[ $verb == update && ${#UPDATED[@]} -gt 0 ]]; then
         notify "Apps updated" "$(printf '%s, ' "${UPDATED[@]}" | sed 's/, $//')"
     fi
+
+    (( had_user )) && sync_app_folder
     return $rc
+}
+
+# maintain a "Nova Tools" folder in the GNOME app grid, grouping every
+# installed Nova app that ships a desktop entry (org.novanetwork.*). Rebuilt
+# from what's actually present, so it self-heals on install/uninstall.
+# User scope + a live GNOME session only; a no-op everywhere else.
+sync_app_folder() {
+    [[ $EUID -eq 0 ]] && return 0
+    command -v gsettings >/dev/null 2>&1 || return 0
+    [[ -n ${DBUS_SESSION_BUS_ADDRESS:-} || -S "${XDG_RUNTIME_DIR:-/run/user/$UID}/bus" ]] || return 0
+
+    local appsdir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    local schema="org.gnome.desktop.app-folders"
+    local path="/org/gnome/desktop/app-folders/folders/nova-tools/"
+    local ids=() f
+    for f in "$appsdir"/org.novanetwork.*.desktop; do
+        [[ -e $f ]] && ids+=("$(basename "$f")")
+    done
+
+    local children; children="$(gsettings get "$schema" folder-children 2>/dev/null)" || return 0
+
+    if [[ ${#ids[@]} -eq 0 ]]; then
+        # no Nova GUI apps left — drop the folder if we had it
+        if [[ $children == *"'nova-tools'"* ]]; then
+            gsettings reset-recursively "$schema.folder:$path" 2>/dev/null || true
+            gsettings set "$schema" folder-children \
+                "$(sed "s/'nova-tools', //; s/, 'nova-tools'//; s/'nova-tools'//" <<<"$children")" 2>/dev/null || true
+        fi
+        return 0
+    fi
+
+    local apps="[" first=1 id
+    for id in "${ids[@]}"; do (( first )) && first=0 || apps+=", "; apps+="'$id'"; done
+    apps+="]"
+    gsettings set "$schema.folder:$path" name 'Nova Tools' 2>/dev/null || return 0
+    gsettings set "$schema.folder:$path" apps "$apps" 2>/dev/null || true
+    gsettings set "$schema.folder:$path" translate false 2>/dev/null || true
+
+    if [[ $children != *"'nova-tools'"* ]]; then
+        if [[ $children == "@as []" || $children == "[]" ]]; then
+            gsettings set "$schema" folder-children "['nova-tools']" 2>/dev/null || true
+        else
+            gsettings set "$schema" folder-children "${children%]}, 'nova-tools']" 2>/dev/null || true
+        fi
+    fi
 }
 
 # ---------- commands --------------------------------------------------------
