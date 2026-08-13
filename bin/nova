@@ -10,7 +10,7 @@
 #   system — listed in /etc/nova-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-NOVA_VERSION="0.8.2"
+NOVA_VERSION="0.8.3"
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 # systemd system services start without $HOME (set -u would abort at the

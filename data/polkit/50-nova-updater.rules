@@ -4,13 +4,19 @@
 // `nova update --all --system`, so nothing user-controlled reaches root.
 // Passwordless is safe ONLY because /usr/local/libexec/nova-system-update is
 // root-owned and not user-writable. Installs/uninstalls still require auth.
-// We intentionally do NOT require subject.local: VM consoles and some desktop
-// sessions report non-local, which caused password prompts. Safe because the
-// target is root-owned, not user-writable, and takes no arguments.
+// pkexec canonicalizes the program path. On Silverblue/Bluefin /usr/local is a
+// symlink to /var/usrlocal, so polkit sees /var/usrlocal/libexec/... — match
+// both so the rule fires on ostree and normal Fedora. subject.local not
+// required (VM/desktop sessions may report non-local); active + wheel is enough
+// because the target is root-owned, not user-writable, and takes no arguments.
 polkit.addRule(function(action, subject) {
-    if (action.id == "org.freedesktop.policykit.exec" &&
-        action.lookup("program") == "/usr/local/libexec/nova-system-update" &&
-        subject.isInGroup("wheel") && subject.active) {
-        return polkit.Result.YES;
+    if (!(subject.isInGroup("wheel") && subject.active))
+        return;
+    if (action.id == "org.freedesktop.policykit.exec") {
+        var p = action.lookup("program");
+        if (p == "/usr/local/libexec/nova-system-update" ||
+            p == "/var/usrlocal/libexec/nova-system-update") {
+            return polkit.Result.YES;
+        }
     }
 });
