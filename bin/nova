@@ -10,7 +10,7 @@
 #   system — listed in /etc/nova-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-NOVA_VERSION="0.3.0"
+NOVA_VERSION="0.3.1"
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 # root-owned copy used for system-scope work (installed by 'install.sh --with-system');
@@ -35,6 +35,12 @@ SYS_PREFIX="/usr/local"
 
 MANIFEST="nova.manifest"
 LS_REMOTE_TIMEOUT=10
+
+# nova only ever reads PUBLIC repos — never prompt for credentials
+# (no terminal prompt, no askpass popup, no keyring credential helper)
+export GIT_TERMINAL_PROMPT=0
+unset GIT_ASKPASS SSH_ASKPASS 2>/dev/null || true
+git() { command git -c credential.helper= "$@"; }
 
 # ---------- output ----------------------------------------------------------
 QUIET=0
