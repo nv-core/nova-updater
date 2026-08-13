@@ -200,9 +200,10 @@ class NovaWindow(Adw.ApplicationWindow):
         self.logbuf.delete_mark(mark)
 
     def selected(self):
-        """Selected apps as (name, scope) — scope matters: the same name can
-        exist in both scopes (e.g. nova-updater itself)."""
-        return [(r.app["name"], r.app["scope"]) for r in self.rows if r.check.get_active()]
+        """Selected apps as (name, scope, status) — scope matters (the same
+        name can exist in both scopes) and status picks install vs update."""
+        return [(r.app["name"], r.app["scope"], r.app["status"])
+                for r in self.rows if r.check.get_active()]
 
     def on_select_updates(self, *_):
         for r in self.rows:
@@ -277,7 +278,7 @@ class NovaWindow(Adw.ApplicationWindow):
                 self.toast("Select at least one app first")
             return
         dlg = Adw.AlertDialog(heading=f"Uninstall {len(sel)} app(s)?",
-                              body=", ".join(f"{n} ({s})" for n, s in sel))
+                              body=", ".join(f"{n} ({s})" for n, s, _ in sel))
         dlg.add_response("cancel", "Cancel")
         dlg.add_response("remove", "Uninstall")
         dlg.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
@@ -293,13 +294,22 @@ class NovaWindow(Adw.ApplicationWindow):
             self.toast("Select at least one app first")
             return
 
-        # one command per scope — the same app name can exist in both scopes,
-        # so the scope flag is what makes the selection unambiguous
+        # one command per scope and per real verb. Installed apps get "update"
+        # (system updates then run passwordless via the root service); only
+        # genuinely new apps get "install" (system installs prompt by design).
         cmds = []
         for scope in ("user", "system"):
-            names = [n for n, s in sel if s == scope]
-            if names:
-                cmds.append([self.nova, verb, f"--{scope}"] + names)
+            if verb == "uninstall":
+                names = [n for n, s, _ in sel if s == scope]
+                if names:
+                    cmds.append([self.nova, "uninstall", f"--{scope}"] + names)
+                continue
+            new = [n for n, s, st in sel if s == scope and st == "not-installed"]
+            upd = [n for n, s, st in sel if s == scope and st != "not-installed"]
+            if new:
+                cmds.append([self.nova, "install", f"--{scope}"] + new)
+            if upd:
+                cmds.append([self.nova, "update", f"--{scope}"] + upd)
 
         self.btn_log.set_active(True)
         self.set_busy(True, f"Running {verb} for {len(sel)} app(s)…")
