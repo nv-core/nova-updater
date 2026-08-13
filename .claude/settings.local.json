@@ -6,6 +6,9 @@
       "Bash(bash -n backend/nova-killswitch-ctl)",
       "Bash(bash -n backend/nova-killswitch-monitor)",
       "Bash(bash -n backend/dispatcher/90-nova-killswitch)"
+    ],
+    "additionalDirectories": [
+      "/var/home/user/Documents/projects/scambert/nova-killswitch"
     ]
   }
 }

@@ -10,7 +10,7 @@
 #   system — listed in /etc/nova-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-NOVA_VERSION="0.6.0"
+NOVA_VERSION="0.6.1"
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 # systemd system services start without $HOME (set -u would abort at the
@@ -308,8 +308,11 @@ install_one() { # scope url opts
     is_installed "$scope" "$url" && action="update"
     local dir; dir="$(sync_repo "$scope" "$url" "$opts")"
 
+    # SCOPE=both/any marks dual-scope apps (installed in both lists, e.g. a
+    # root backend + a user GUI) — no warning for those.
     local mscope; mscope="$(manifest_get "$dir" SCOPE "$scope")"
-    [[ $mscope != "$scope" ]] && warn "$(app_name "$scope" "$url"): manifest declares SCOPE=$mscope but app is in the $scope list"
+    [[ $mscope != "$scope" && $mscope != both && $mscope != any ]] && \
+        warn "$(app_name "$scope" "$url"): manifest declares SCOPE=$mscope but app is in the $scope list"
 
     run_installer "$scope" "$dir" "$action"
     write_marker "$dir"
