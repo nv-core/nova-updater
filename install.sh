@@ -106,8 +106,11 @@ user_install() {
         sed "s|^Exec=.*|Exec=$USER_BIN/nova-gui|" "$SRC/data/nova-gui.desktop" \
             > "$USER_APPS/org.novanetwork.NovaUpdater.desktop"
         rm -f "$USER_APPS/nova-gui.desktop"   # pre-0.2 name
-        install -Dm644 "$SRC/data/icons/org.novanetwork.NovaUpdater.svg" \
-            "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/org.novanetwork.NovaUpdater.svg"
+        install -Dm644 "$SRC/data/icons/org.novanetwork.NovaUpdater.png" \
+            "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps/org.novanetwork.NovaUpdater.png"
+        rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/org.novanetwork.NovaUpdater.svg"
+        command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+            gtk-update-icon-cache -qtf "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" 2>/dev/null || true
     else
         say "no GTK4 stack (or --cli-only) — skipping GUI"
     fi
@@ -140,6 +143,7 @@ user_uninstall() {
     systemctl --user daemon-reload
     rm -f "$USER_BIN/nova" "$USER_BIN/nova-gui" \
           "$USER_APPS/org.novanetwork.NovaUpdater.desktop" "$USER_APPS/nova-gui.desktop" \
+          "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps/org.novanetwork.NovaUpdater.png" \
           "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/org.novanetwork.NovaUpdater.svg"
     if (( PURGE )); then
         say "purging $USER_CONF and $USER_DATA"
