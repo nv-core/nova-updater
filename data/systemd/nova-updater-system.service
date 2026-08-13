@@ -1,0 +1,13 @@
+[Unit]
+Description=Nova Updater — auto-update system apps (and nova itself)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nova update --all --system --quiet
+Nice=10
+IOSchedulingClass=idle
+# hardening (installers still need broad write access, so keep it light)
+ProtectHome=read-only
+PrivateTmp=true

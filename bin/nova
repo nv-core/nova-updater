@@ -1,0 +1,569 @@
+#!/usr/bin/env bash
+# nova — git-based installer/updater for Nova Network tools on Fedora Silverblue
+# maintained by the Nova Core Team
+#
+# Apps are plain git repos containing a `nova.manifest` and an installer
+# script (default: install.sh) that supports: install | update | uninstall
+#
+# Scopes:
+#   user   — listed in ~/.config/nova-updater/apps.list, repos in ~/.local/share
+#   system — listed in /etc/nova-updater/apps.list,      repos in /var/lib
+set -euo pipefail
+
+NOVA_VERSION="0.2.0"
+SELF="$(realpath "${BASH_SOURCE[0]}")"
+
+# root-owned copy used for system-scope work (installed by 'install.sh --with-system');
+# escalating to it instead of $SELF means root never executes a user-writable file
+ROOT_NOVA="/usr/local/bin/nova"
+root_nova() { [[ -x $ROOT_NOVA ]] && echo "$ROOT_NOVA" || echo "$SELF"; }
+
+# ---------- paths -----------------------------------------------------------
+USER_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nova-updater"
+USER_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/nova-updater"
+USER_LIST="$USER_CONFIG_DIR/apps.list"
+USER_CATALOGS="$USER_CONFIG_DIR/catalogs.list"
+USER_REPOS="$USER_DATA_DIR/repos"
+USER_PREFIX="$HOME/.local"
+
+SYS_CONFIG_DIR="/etc/nova-updater"
+SYS_LIST="$SYS_CONFIG_DIR/apps.list"
+SYS_CATALOGS="$SYS_CONFIG_DIR/catalogs.list"
+SYS_DATA_DIR="/var/lib/nova-updater"
+SYS_REPOS="$SYS_DATA_DIR/repos"
+SYS_PREFIX="/usr/local"
+
+MANIFEST="nova.manifest"
+LS_REMOTE_TIMEOUT=10
+
+# ---------- output ----------------------------------------------------------
+QUIET=0
+NOTIFY=0
+
+c_bold=$'\033[1m'; c_grn=$'\033[32m'; c_ylw=$'\033[33m'; c_red=$'\033[31m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
+[[ -t 1 ]] || { c_bold=""; c_grn=""; c_ylw=""; c_red=""; c_dim=""; c_off=""; }
+
+log()  { (( QUIET )) || printf '%s\n' "$*"; }
+info() { (( QUIET )) || printf '%s::%s %s\n' "$c_bold" "$c_off" "$*"; }
+warn() { printf '%swarning:%s %s\n' "$c_ylw" "$c_off" "$*" >&2; }
+die()  { printf '%serror:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
+
+notify() { # summary body
+    (( NOTIFY )) || return 0
+    command -v notify-send >/dev/null 2>&1 || return 0
+    notify-send --app-name="Nova Updater" --icon=system-software-update "$1" "$2" 2>/dev/null || true
+}
+
+# ---------- helpers ---------------------------------------------------------
+as_root() {
+    if [[ $EUID -eq 0 ]]; then
+        "$@"
+    elif [[ -t 0 ]] && command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    elif command -v pkexec >/dev/null 2>&1; then
+        pkexec "$@"
+    else
+        die "need root privileges but neither sudo (tty) nor pkexec is available"
+    fi
+}
+
+list_file()  { [[ $1 == system ]] && echo "$SYS_LIST"   || echo "$USER_LIST"; }
+repos_dir()  { [[ $1 == system ]] && echo "$SYS_REPOS"  || echo "$USER_REPOS"; }
+prefix_for() { [[ $1 == system ]] && echo "$SYS_PREFIX" || echo "$USER_PREFIX"; }
+
+# scopes visible to the current invocation
+scopes() {
+    if [[ $EUID -eq 0 ]]; then echo system
+    elif [[ $SCOPE_FILTER == user ]]; then echo user
+    elif [[ $SCOPE_FILTER == system ]]; then echo system
+    else echo "user system"
+    fi
+}
+
+catalogs_dir() { [[ $EUID -eq 0 ]] && echo "$SYS_DATA_DIR/catalogs" || echo "$USER_DATA_DIR/catalogs"; }
+
+catalog_urls() {
+    local f files=()
+    [[ $EUID -eq 0 ]] && files=("$SYS_CATALOGS") || files=("$USER_CATALOGS" "$SYS_CATALOGS")
+    for f in "${files[@]}"; do
+        [[ -r $f ]] && grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null
+    done | sort -u
+}
+
+# clone/refresh all registered catalog repos (best effort — offline is fine)
+sync_catalogs() {
+    local url _ dir cdir; cdir="$(catalogs_dir)"
+    while read -r url _; do
+        [[ -z $url ]] && continue
+        dir="$cdir/$(dir_name "$url")"
+        if [[ -d "$dir/.git" ]]; then
+            { git -C "$dir" fetch --quiet origin 2>/dev/null &&
+              git -C "$dir" reset --hard --quiet origin/HEAD 2>/dev/null; } ||
+                warn "catalog sync failed, using cached copy: $url"
+        else
+            mkdir -p "$cdir"
+            git clone --quiet "$url" "$dir" 2>/dev/null || warn "cannot fetch catalog: $url"
+        fi
+    done < <(catalog_urls)
+}
+
+# local list entries + catalog entries for a scope, as "url opts" lines
+raw_entries() { # scope
+    local f; f="$(list_file "$1")"
+    if [[ -r $f ]]; then grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null || true; fi
+    local c url opts
+    for c in "$(catalogs_dir)"/*/; do
+        [[ -f "${c}apps.list" ]] || continue
+        while read -r url opts; do
+            [[ -z ${url:-} ]] && continue
+            [[ "$(entry_opt "${opts:-}" scope user)" == "$1" ]] && printf '%s %s\n' "$url" "${opts:-}"
+        done < <(grep -Ev '^[[:space:]]*(#|$)' "${c}apps.list" 2>/dev/null || true)
+    done
+}
+
+# print "url<TAB>opts" for every app of a scope, deduped (local list wins)
+entries() { # scope
+    local url opts d seen=" "
+    while read -r url opts; do
+        [[ -z $url ]] && continue
+        d="$(dir_name "$url")"
+        [[ $seen == *" $d "* ]] && continue
+        seen+="$d "
+        printf '%s\t%s\n' "$url" "${opts:-}"
+    done < <(raw_entries "$1")
+}
+
+dir_name() { # url -> repo directory name
+    local b; b="$(basename "$1")"
+    echo "${b%.git}"
+}
+
+entry_opt() { # opts key default   (opts: "key=val key=val")
+    local kv
+    for kv in $1; do
+        [[ $kv == "$2="* ]] && { echo "${kv#*=}"; return; }
+    done
+    echo "$3"
+}
+
+manifest_get() { # repo_dir key default
+    local v=""
+    [[ -f "$1/$MANIFEST" ]] && v="$(grep -E "^$2=" "$1/$MANIFEST" 2>/dev/null | head -1 | cut -d= -f2-)"
+    echo "${v:-$3}"
+}
+
+app_name() { # scope url -> manifest NAME if cloned, else dir name
+    local d; d="$(repos_dir "$1")/$(dir_name "$2")"
+    manifest_get "$d" NAME "$(dir_name "$2")"
+}
+
+is_installed() { # scope url
+    [[ -f "$(repos_dir "$1")/$(dir_name "$2")/.nova-installed" ]]
+}
+
+local_head() { # repo_dir
+    git -C "$1" rev-parse HEAD 2>/dev/null || echo "-"
+}
+
+# resolve the commit an app should be at: ref= pin > branch= > latest tag > HEAD
+remote_target() { # url opts -> "sha<TAB>refname"; empty output on failure
+    local url="$1" opts="${2:-}" out sha="" ref branch tag
+    out="$(timeout "$LS_REMOTE_TIMEOUT" git ls-remote --quiet "$url" 2>/dev/null)" || return 1
+    [[ -n $out ]] || return 1
+    ref="$(entry_opt "$opts" ref "")"
+    branch="$(entry_opt "$opts" branch "")"
+    if [[ -n $ref ]]; then
+        # prefer the peeled commit of an annotated tag
+        sha="$(awk -v r="$ref" '$2=="refs/tags/"r"^{}"{print $1;exit}' <<<"$out")"
+        [[ -n $sha ]] || sha="$(awk -v r="$ref" '$2=="refs/tags/"r || $2=="refs/heads/"r{print $1;exit}' <<<"$out")"
+        [[ -n $sha ]] && printf '%s\t%s\n' "$sha" "$ref"
+    elif [[ -n $branch ]]; then
+        sha="$(awk -v b="$branch" '$2=="refs/heads/"b{print $1;exit}' <<<"$out")"
+        [[ -n $sha ]] && printf '%s\t%s\n' "$sha" "$branch"
+    else
+        tag="$(awk '$2 ~ /^refs\/tags\// && $2 !~ /\^\{\}$/{sub("refs/tags/","",$2); print $2}' <<<"$out" | sort -V | tail -1)"
+        if [[ -n $tag ]]; then
+            sha="$(awk -v t="$tag" '$2=="refs/tags/"t"^{}"{print $1;exit}' <<<"$out")"
+            [[ -n $sha ]] || sha="$(awk -v t="$tag" '$2=="refs/tags/"t{print $1;exit}' <<<"$out")"
+            printf '%s\t%s\n' "$sha" "$tag"
+        else
+            awk '$2=="HEAD"{print $1"\tHEAD";exit}' <<<"$out"
+        fi
+    fi
+}
+
+# resolve a user-supplied name to "scope<TAB>url<TAB>opts"; empty if not found
+resolve() { # name
+    local scope url opts
+    for scope in $(scopes); do
+        while IFS=$'\t' read -r url opts; do
+            [[ -z $url ]] && continue
+            if [[ "$(dir_name "$url")" == "$1" || "$(app_name "$scope" "$url")" == "$1" ]]; then
+                printf '%s\t%s\t%s\n' "$scope" "$url" "$opts"
+                return 0
+            fi
+        done < <(entries "$scope")
+    done
+    return 1
+}
+
+acquire_lock() { # scope
+    local lock
+    if [[ $1 == system ]]; then
+        mkdir -p "$SYS_DATA_DIR"; lock="$SYS_DATA_DIR/lock"
+    else
+        mkdir -p "$USER_DATA_DIR"; lock="$USER_DATA_DIR/lock"
+    fi
+    exec 9>"$lock"
+    flock -n 9 || die "another nova instance is already running ($1 scope)"
+}
+
+run_installer() { # scope repo_dir action
+    local scope="$1" dir="$2" action="$3"
+    local inst; inst="$(manifest_get "$dir" INSTALLER install.sh)"
+    [[ -f "$dir/$inst" ]] || die "installer '$inst' not found in $dir"
+    info "running $inst $action ($scope scope)"
+    ( cd "$dir" &&
+      env NOVA_SCOPE="$scope" \
+          NOVA_ACTION="$action" \
+          NOVA_APP_DIR="$dir" \
+          NOVA_PREFIX="$(prefix_for "$scope")" \
+          bash "./$inst" "$action" )
+}
+
+sync_repo() { # scope url opts -> clones + checks out the target ref, echoes repo dir
+    local scope="$1" url="$2" opts="${3:-}"
+    local dir; dir="$(repos_dir "$scope")/$(dir_name "$url")"
+    local target sha refname
+    target="$(remote_target "$url" "$opts" || true)"
+    if [[ ! -d "$dir/.git" ]]; then
+        [[ -n $target ]] || die "cannot reach $url"
+        mkdir -p "$(repos_dir "$scope")"
+        git clone --quiet "$url" "$dir"
+    fi
+    if [[ -n $target ]]; then
+        IFS=$'\t' read -r sha refname <<<"$target"
+        git -C "$dir" fetch --quiet --tags origin
+        git -C "$dir" -c advice.detachedHead=false checkout --quiet --force "$sha"
+    fi
+    echo "$dir"
+}
+
+install_one() { # scope url opts
+    local scope="$1" url="$2" opts="${3:-}"
+    local action="install"
+    is_installed "$scope" "$url" && action="update"
+    local dir; dir="$(sync_repo "$scope" "$url" "$opts")"
+
+    local mscope; mscope="$(manifest_get "$dir" SCOPE "$scope")"
+    [[ $mscope != "$scope" ]] && warn "$(app_name "$scope" "$url"): manifest declares SCOPE=$mscope but app is in the $scope list"
+
+    run_installer "$scope" "$dir" "$action"
+    local_head "$dir" > "$dir/.nova-installed"
+    info "${c_grn}$(app_name "$scope" "$url") ${action}ed${c_off} (${scope}, $(manifest_get "$dir" VERSION "?"))"
+}
+
+update_one() { # scope url opts   (appends to global UPDATED array)
+    local scope="$1" url="$2" opts="${3:-}"
+    local name; name="$(app_name "$scope" "$url")"
+    if ! is_installed "$scope" "$url"; then
+        log "${c_dim}skipping $name (not installed)${c_off}"
+        return 0
+    fi
+    local dir="$(repos_dir "$scope")/$(dir_name "$url")"
+    local before; before="$(local_head "$dir")"
+    sync_repo "$scope" "$url" "$opts" >/dev/null
+    if [[ "$(local_head "$dir")" == "$before" && ${FORCE:-0} -eq 0 ]]; then
+        log "$name is up to date"
+        return 0
+    fi
+    run_installer "$scope" "$dir" update
+    local_head "$dir" > "$dir/.nova-installed"
+    info "${c_grn}$name updated${c_off} to $(manifest_get "$dir" VERSION "?")"
+    UPDATED+=("$name")
+}
+
+uninstall_one() { # scope url purge
+    local scope="$1" url="$2" purge="$3"
+    local name; name="$(app_name "$scope" "$url")"
+    local dir="$(repos_dir "$scope")/$(dir_name "$url")"
+    if [[ -d $dir ]]; then
+        is_installed "$scope" "$url" && run_installer "$scope" "$dir" uninstall
+        rm -rf "$dir"
+        info "${c_grn}$name uninstalled${c_off}"
+    else
+        log "$name is not installed"
+    fi
+    if [[ $purge -eq 1 ]]; then
+        local f; f="$(list_file "$scope")"
+        local tmp; tmp="$(mktemp)"
+        grep -vF "$url" "$f" > "$tmp" || true
+        cat "$tmp" > "$f"; rm -f "$tmp"
+        info "removed $name from $f"
+    fi
+}
+
+# split requested names into per-scope url lists; escalate system work if needed
+# sets arrays: T_SCOPE T_URL T_OPTS
+collect_targets() { # all|names...
+    T_SCOPE=(); T_URL=(); T_OPTS=()
+    if [[ $1 == --all ]]; then
+        local scope url opts
+        for scope in $(scopes); do
+            while IFS=$'\t' read -r url opts; do
+                [[ -z $url ]] && continue
+                T_SCOPE+=("$scope"); T_URL+=("$url"); T_OPTS+=("$opts")
+            done < <(entries "$scope")
+        done
+    else
+        local n line
+        for n in "$@"; do
+            line="$(resolve "$n")" || die "unknown app: $n (check 'nova list')"
+            IFS=$'\t' read -r scope url opts <<<"$line"
+            T_SCOPE+=("$scope"); T_URL+=("$url"); T_OPTS+=("$opts")
+        done
+    fi
+    [[ ${#T_URL[@]} -gt 0 ]] || die "no apps matched (is your apps.list empty?)"
+}
+
+# run <verb> for all targets; system targets are re-executed via as_root
+dispatch() { # verb extra_flag
+    local verb="$1" i had_user=0 sys_names=()
+    for i in "${!T_URL[@]}"; do
+        [[ ${T_SCOPE[$i]} == user ]] && had_user=1
+        [[ ${T_SCOPE[$i]} == system && $EUID -ne 0 ]] && sys_names+=("$(app_name system "${T_URL[$i]}")")
+    done
+
+    if (( had_user )); then acquire_lock user; fi
+    if [[ $EUID -eq 0 ]]; then acquire_lock system; fi
+
+    local rc=0
+    UPDATED=()
+    for i in "${!T_URL[@]}"; do
+        [[ ${T_SCOPE[$i]} == system && $EUID -ne 0 ]] && continue
+        case "$verb" in
+            install)   install_one   "${T_SCOPE[$i]}" "${T_URL[$i]}" "${T_OPTS[$i]}" || rc=1 ;;
+            update)    update_one    "${T_SCOPE[$i]}" "${T_URL[$i]}" "${T_OPTS[$i]}" || rc=1 ;;
+            uninstall) uninstall_one "${T_SCOPE[$i]}" "${T_URL[$i]}" "${PURGE:-0}"   || rc=1 ;;
+        esac
+    done
+
+    if [[ ${#sys_names[@]} -gt 0 ]]; then
+        info "escalating for system apps: ${sys_names[*]}"
+        local extra=()
+        (( PURGE )) && extra+=(--purge)
+        (( FORCE )) && extra+=(--force)
+        as_root "$(root_nova)" "$verb" --system "${sys_names[@]}" "${extra[@]+"${extra[@]}"}" || rc=1
+    fi
+
+    if [[ $verb == update && ${#UPDATED[@]} -gt 0 ]]; then
+        notify "Apps updated" "$(printf '%s, ' "${UPDATED[@]}" | sed 's/, $//')"
+    fi
+    return $rc
+}
+
+# ---------- commands --------------------------------------------------------
+cmd_list() {
+    local porcelain=0 check=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --porcelain) porcelain=1 ;;
+            --check)     check=1 ;;
+            *) die "unknown option: $1" ;;
+        esac; shift
+    done
+
+    (( check )) && sync_catalogs
+
+    local scope url opts dir name typ ver desc status target tsha tref
+    local found=0
+    (( porcelain )) || printf '%s%-20s %-7s %-16s %-10s %-18s %s%s\n' "$c_bold" NAME SCOPE TYPE VERSION STATUS DESCRIPTION "$c_off"
+    for scope in $(scopes); do
+        while IFS=$'\t' read -r url opts; do
+            [[ -z $url ]] && continue
+            found=1
+            dir="$(repos_dir "$scope")/$(dir_name "$url")"
+            name="$(app_name "$scope" "$url")"
+            typ="$(manifest_get "$dir" TYPE "?")"
+            ver="$(manifest_get "$dir" VERSION "-")"
+            desc="$(manifest_get "$dir" DESCRIPTION "")"
+            tref=""
+            if is_installed "$scope" "$url"; then
+                status="installed"
+                if (( check )); then
+                    target="$(remote_target "$url" "$opts" || true)"
+                    IFS=$'\t' read -r tsha tref <<<"$target"
+                    if [[ -z ${tsha:-} ]]; then status="unreachable"
+                    elif [[ $tsha != "$(local_head "$dir")" ]]; then status="update-available"; fi
+                fi
+            else
+                status="not-installed"; ver="-"
+            fi
+            if (( porcelain )); then
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$scope" "$typ" "$status" "$ver" "$url" "$desc" "${tref:-}"
+            else
+                local col=""
+                [[ $status == update-available ]] && col="$c_ylw"
+                [[ $status == installed ]] && col="$c_grn"
+                printf '%-20s %-7s %-16s %-10s %s%-18s%s %s\n' "$name" "$scope" "$typ" "$ver" "$col" "$status" "$c_off" "$desc"
+            fi
+        done < <(entries "$scope")
+    done
+    (( found )) || log "${c_dim}no apps configured — add one with: nova add <git-url>${c_off}"
+}
+
+cmd_check() {
+    sync_catalogs
+    local scope url opts dir n=0 target tsha tref
+    for scope in $(scopes); do
+        while IFS=$'\t' read -r url opts; do
+            [[ -z $url ]] && continue
+            is_installed "$scope" "$url" || continue
+            dir="$(repos_dir "$scope")/$(dir_name "$url")"
+            target="$(remote_target "$url" "$opts" || true)"
+            IFS=$'\t' read -r tsha tref <<<"$target"
+            if [[ -n ${tsha:-} && $tsha != "$(local_head "$dir")" ]]; then
+                log "${c_ylw}update available:${c_off} $(app_name "$scope" "$url") ($scope) -> $tref"
+                n=$((n+1))
+            fi
+        done < <(entries "$scope")
+    done
+    if (( n > 0 )); then
+        notify "Updates available" "$n app(s) can be updated"
+        log "$n update(s) available"
+        return 10
+    fi
+    log "everything is up to date"
+}
+
+cmd_add() {
+    local url="" system=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --system) system=1 ;;
+            -*) die "unknown option: $1" ;;
+            *) url="$1" ;;
+        esac; shift
+    done
+    [[ -n $url ]] || die "usage: nova add <git-url> [--system]"
+    local scope=user f
+    (( system )) && scope=system
+    f="$(list_file "$scope")"
+    if [[ $scope == system && $EUID -ne 0 ]]; then
+        as_root "$(root_nova)" add --system "$url"
+        return
+    fi
+    mkdir -p "$(dirname "$f")"; touch "$f"
+    grep -qF "$url" "$f" && die "already in $f"
+    echo "$url" >> "$f"
+    info "added $(dir_name "$url") to $scope list — install it with: nova install $(dir_name "$url")"
+}
+
+cmd_catalog() { # add <url> | list      (--system routes to the system file)
+    local sub="${1:-list}"; shift || true
+    case "$sub" in
+        add)
+            local url="${1:-}"
+            [[ -n $url ]] || die "usage: nova catalog add <git-url> [--system]"
+            local f="$USER_CATALOGS"
+            [[ $SCOPE_FILTER == system ]] && f="$SYS_CATALOGS"
+            if [[ $f == "$SYS_CATALOGS" && $EUID -ne 0 ]]; then
+                as_root "$(root_nova)" catalog add "$url" --system
+                return
+            fi
+            mkdir -p "$(dirname "$f")"; touch "$f"
+            grep -qF "$url" "$f" && die "catalog already registered in $f"
+            echo "$url" >> "$f"
+            sync_catalogs
+            info "catalog added — its apps now show up in 'nova list'"
+            ;;
+        list)
+            catalog_urls
+            ;;
+        *) die "usage: nova catalog add <git-url> [--system] | nova catalog list" ;;
+    esac
+}
+
+cmd_self_update() {
+    local line
+    if line="$(resolve nova-updater)"; then
+        IFS=$'\t' read -r scope url opts <<<"$line"
+        T_SCOPE=("$scope"); T_URL=("$url"); T_OPTS=("$opts")
+        dispatch update
+    else
+        die "nova-updater is not in any apps.list — reinstall via its install.sh"
+    fi
+}
+
+usage() {
+    cat <<EOF
+${c_bold}nova $NOVA_VERSION${c_off} — git-based installer/updater (Fedora Silverblue)
+
+${c_bold}usage:${c_off} nova <command> [options]
+
+${c_bold}commands:${c_off}
+  list [--check] [--porcelain]   list all apps (--check also queries remotes)
+  check                          check for updates (exit 10 if any)
+  add <git-url> [--system]       add a repo to the user or system app list
+  catalog add <git-url>|list     register a catalog repo (shared app list)
+  sync                           refresh all registered catalogs
+  install <name...|--all>        clone + run the app's installer
+  update  [name...|--all]        fetch + reinstall apps that changed [--force]
+  uninstall <name...> [--purge]  run the app's uninstaller (--purge: drop from list)
+  self-update                    update nova itself
+  version                        print version
+
+${c_bold}options:${c_off}
+  --user / --system              restrict to one scope
+  --quiet                        minimal output (for services)
+  --notify                       send desktop notifications (for services)
+
+${c_bold}versioning:${c_off}
+  apps follow their latest git tag (version-sorted); repos without tags
+  follow HEAD. entries can pin with 'ref=<tag>' or track 'branch=<name>'.
+
+${c_bold}files:${c_off}
+  user apps:      $USER_LIST
+  system apps:    $SYS_LIST
+  user catalogs:  $USER_CATALOGS
+  system catalogs:$SYS_CATALOGS
+EOF
+}
+
+# ---------- main ------------------------------------------------------------
+SCOPE_FILTER=""
+FORCE=0
+PURGE=0
+ARGS=()
+CMD="${1:-}"; shift || true
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --user)   SCOPE_FILTER=user ;;
+        --system) SCOPE_FILTER=system ;;
+        --quiet)  QUIET=1 ;;
+        --notify) NOTIFY=1 ;;
+        --force)  FORCE=1 ;;
+        --purge)  PURGE=1 ;;
+        *) ARGS+=("$1") ;;
+    esac
+    shift
+done
+
+command -v git >/dev/null 2>&1 || die "git is required (rpm-ostree install git)"
+
+case "$CMD" in
+    list)        cmd_list ${ARGS[@]+"${ARGS[@]}"} ;;
+    check)       cmd_check ;;
+    add)         cmd_add ${ARGS[@]+"${ARGS[@]}"} $( [[ $SCOPE_FILTER == system ]] && echo --system || true ) ;;
+    catalog)     cmd_catalog ${ARGS[@]+"${ARGS[@]}"} ;;
+    sync)        sync_catalogs; info "catalogs synced" ;;
+    install)     sync_catalogs; collect_targets "${ARGS[@]:---all}"; dispatch install ;;
+    update)      sync_catalogs; collect_targets "${ARGS[@]:---all}"; dispatch update ;;
+    uninstall)   [[ ${#ARGS[@]} -gt 0 ]] || die "usage: nova uninstall <name...>"
+                 collect_targets "${ARGS[@]}"; dispatch uninstall ;;
+    self-update) cmd_self_update ;;
+    version)     echo "nova $NOVA_VERSION" ;;
+    ""|help|-h|--help) usage ;;
+    *)           die "unknown command: $CMD (see 'nova help')" ;;
+esac

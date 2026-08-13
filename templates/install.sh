@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# install.sh — template installer for nova-managed tools
+#
+# nova runs this from the repo root as:  ./install.sh install|update|uninstall
+# with these environment variables set:
+#   NOVA_SCOPE    user | system
+#   NOVA_PREFIX   ~/.local (user)  or  /usr/local (system)
+#   NOVA_APP_DIR  absolute path of this repo's clone
+#   NOVA_ACTION   same as $1
+#
+# For SCOPE=system apps this script already runs as root — no sudo needed.
+set -euo pipefail
+
+# fallbacks so the script also works standalone (without nova)
+NOVA_SCOPE="${NOVA_SCOPE:-user}"
+if [[ $NOVA_SCOPE == system ]]; then
+    NOVA_PREFIX="${NOVA_PREFIX:-/usr/local}"
+else
+    NOVA_PREFIX="${NOVA_PREFIX:-$HOME/.local}"
+fi
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+APP=my-tool   # keep in sync with NAME in nova.manifest
+
+do_install() {
+    # --- CLI tool example -------------------------------------------------
+    install -Dm755 "$SRC/bin/$APP" "$NOVA_PREFIX/bin/$APP"
+
+    # --- GTK GUI example (uncomment) ---------------------------------------
+    # install -Dm755 "$SRC/gui/$APP-gui" "$NOVA_PREFIX/bin/$APP-gui"
+    # install -Dm644 "$SRC/data/$APP.desktop" "$NOVA_PREFIX/share/applications/$APP.desktop"
+
+    # --- GNOME extension example (SCOPE=user, TYPE=gnome-extension) --------
+    # UUID="my-ext@nova-network"
+    # EXT_DIR="$HOME/.local/share/gnome-shell/extensions/$UUID"
+    # mkdir -p "$EXT_DIR" && cp -r "$SRC/src/." "$EXT_DIR/"
+    # gnome-extensions enable "$UUID" || true   # takes effect after re-login
+
+    # --- system config / services example (SCOPE=system) --------------------
+    # install -Dm600 "$SRC/conf/wg0.conf" /etc/wireguard/wg0.conf
+    # install -Dm644 "$SRC/systemd/$APP.service" /etc/systemd/system/$APP.service
+    # systemctl daemon-reload && systemctl enable --now "$APP.service"
+    :
+}
+
+do_update() {
+    # most tools can simply reinstall; add migrations here if needed
+    do_install
+}
+
+do_uninstall() {
+    rm -f "$NOVA_PREFIX/bin/$APP"
+    # rm -f "$NOVA_PREFIX/bin/$APP-gui" "$NOVA_PREFIX/share/applications/$APP.desktop"
+    # gnome-extensions disable "$UUID" || true; rm -rf "$EXT_DIR"
+    # systemctl disable --now "$APP.service" || true; rm -f /etc/systemd/system/$APP.service
+    :
+}
+
+case "${1:-install}" in
+    install)   do_install ;;
+    update)    do_update ;;
+    uninstall) do_uninstall ;;
+    *) echo "usage: $0 install|update|uninstall" >&2; exit 1 ;;
+esac

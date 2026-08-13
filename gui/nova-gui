@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""nova-gui — GTK3 frontend for nova, the git-based app updater.
+
+Thin UI layer: all real work is delegated to the `nova` CLI. The app list
+comes from `nova list --porcelain --check`; actions stream their output
+into the log pane.
+"""
+import os
+import shlex
+import shutil
+import signal
+import subprocess
+import threading
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib, Pango, Gdk  # noqa: E402
+
+APP_ID = "org.novanetwork.NovaUpdater"
+
+# column indices in the ListStore
+COL_SELECTED, COL_NAME, COL_TYPE, COL_SCOPE, COL_VERSION, COL_STATUS, COL_DESC, COL_URL = range(8)
+
+STATUS_LABEL = {
+    "installed":        ("Installed", "#2ec27e"),
+    "update-available": ("Update available", "#e5a50a"),
+    "not-installed":    ("Not installed", "#77767b"),
+    "unreachable":      ("Remote unreachable", "#c01c28"),
+}
+
+TYPE_ICON = {
+    "cli": "utilities-terminal-symbolic",
+    "gui": "application-x-executable-symbolic",
+    "gnome-extension": "application-x-addon-symbolic",
+    "system": "emblem-system-symbolic",
+}
+
+
+def find_nova():
+    """Locate the nova CLI: PATH, then the standard install locations, then the dev checkout."""
+    candidates = [
+        shutil.which("nova"),
+        os.path.expanduser("~/.local/bin/nova"),
+        "/usr/local/bin/nova",
+        os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "bin", "nova"),
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return os.path.realpath(c)
+    return None
+
+
+class NovaWindow(Gtk.ApplicationWindow):
+    def __init__(self, app, nova):
+        super().__init__(application=app, title="Nova Updater")
+        self.nova = nova
+        self.proc = None
+        self.busy = False
+        self.set_default_size(880, 620)
+        self.set_icon_name("system-software-update")
+
+        # ---- header bar -----------------------------------------------
+        hb = Gtk.HeaderBar(show_close_button=True, title="Nova Updater")
+        self.set_titlebar(hb)
+
+        self.btn_refresh = Gtk.Button.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.BUTTON)
+        self.btn_refresh.set_tooltip_text("Refresh app list and check for updates")
+        self.btn_refresh.connect("clicked", lambda *_: self.refresh())
+        hb.pack_start(self.btn_refresh)
+
+        self.btn_select_updates = Gtk.Button(label="Select updates")
+        self.btn_select_updates.set_tooltip_text("Select every app with an available update")
+        self.btn_select_updates.connect("clicked", self.on_select_updates)
+        hb.pack_start(self.btn_select_updates)
+
+        self.btn_uninstall = Gtk.Button(label="Uninstall")
+        self.btn_uninstall.get_style_context().add_class("destructive-action")
+        self.btn_uninstall.connect("clicked", lambda *_: self.run_action("uninstall"))
+        hb.pack_end(self.btn_uninstall)
+
+        self.btn_install = Gtk.Button(label="Install / Update")
+        self.btn_install.get_style_context().add_class("suggested-action")
+        self.btn_install.connect("clicked", lambda *_: self.run_action("install"))
+        hb.pack_end(self.btn_install)
+
+        # ---- app list ---------------------------------------------------
+        self.store = Gtk.ListStore(bool, str, str, str, str, str, str, str)
+        self.view = Gtk.TreeView(model=self.store)
+        self.view.set_enable_search(True)
+        self.view.set_search_column(COL_NAME)
+
+        toggle = Gtk.CellRendererToggle()
+        toggle.connect("toggled", self.on_toggled)
+        self.view.append_column(Gtk.TreeViewColumn("", toggle, active=COL_SELECTED))
+
+        def col(title, idx, expand=False, weight=None):
+            r = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
+            if weight:
+                r.set_property("weight", weight)
+            c = Gtk.TreeViewColumn(title, r, text=idx)
+            c.set_expand(expand)
+            c.set_resizable(True)
+            c.set_sort_column_id(idx)
+            return c
+
+        self.view.append_column(col("Name", COL_NAME, weight=Pango.Weight.BOLD))
+        self.view.append_column(col("Type", COL_TYPE))
+        self.view.append_column(col("Scope", COL_SCOPE))
+        self.view.append_column(col("Version", COL_VERSION))
+
+        status_r = Gtk.CellRendererText()
+        status_c = Gtk.TreeViewColumn("Status", status_r, markup=COL_STATUS)
+        status_c.set_sort_column_id(COL_STATUS)
+        self.view.append_column(status_c)
+        self.view.append_column(col("Description", COL_DESC, expand=True))
+
+        scroll = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+        scroll.add(self.view)
+
+        # ---- log pane ---------------------------------------------------
+        self.logbuf = Gtk.TextBuffer()
+        logview = Gtk.TextView(buffer=self.logbuf, editable=False, monospace=True,
+                               wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        logview.set_left_margin(8)
+        logview.set_top_margin(6)
+        self.logview = logview
+        logscroll = Gtk.ScrolledWindow()
+        logscroll.set_min_content_height(150)
+        logscroll.add(logview)
+        self.log_expander = Gtk.Expander(label="Log")
+        self.log_expander.add(logscroll)
+
+        # ---- status bar -------------------------------------------------
+        self.spinner = Gtk.Spinner()
+        self.status_label = Gtk.Label(label="", xalign=0)
+        statusbox = Gtk.Box(spacing=8, margin=6)
+        statusbox.pack_start(self.spinner, False, False, 0)
+        statusbox.pack_start(self.status_label, True, True, 0)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.pack_start(scroll, True, True, 0)
+        box.pack_start(self.log_expander, False, False, 0)
+        box.pack_start(statusbox, False, False, 0)
+        self.add(box)
+        self.show_all()
+
+        self.refresh()
+
+    # ---- helpers --------------------------------------------------------
+    def set_busy(self, busy, message=""):
+        self.busy = busy
+        for b in (self.btn_refresh, self.btn_install, self.btn_uninstall, self.btn_select_updates):
+            b.set_sensitive(not busy)
+        self.status_label.set_text(message)
+        if busy:
+            self.spinner.start()
+        else:
+            self.spinner.stop()
+
+    def append_log(self, text):
+        end = self.logbuf.get_end_iter()
+        self.logbuf.insert(end, text)
+        mark = self.logbuf.create_mark(None, self.logbuf.get_end_iter(), False)
+        self.logview.scroll_mark_onscreen(mark)
+        self.logbuf.delete_mark(mark)
+
+    def selected_apps(self):
+        return [(row[COL_NAME], row[COL_SCOPE]) for row in self.store if row[COL_SELECTED]]
+
+    def on_toggled(self, _renderer, path):
+        self.store[path][COL_SELECTED] = not self.store[path][COL_SELECTED]
+
+    def on_select_updates(self, *_):
+        for row in self.store:
+            row[COL_SELECTED] = "Update available" in row[COL_STATUS]
+
+    # ---- refresh (nova list --porcelain --check) --------------------------
+    def refresh(self):
+        if self.busy:
+            return
+        self.set_busy(True, "Checking for updates…")
+
+        def worker():
+            try:
+                out = subprocess.run(
+                    [self.nova, "list", "--porcelain", "--check"],
+                    capture_output=True, text=True, timeout=120,
+                ).stdout
+            except Exception as e:  # noqa: BLE001
+                out = ""
+                GLib.idle_add(self.append_log, f"refresh failed: {e}\n")
+            GLib.idle_add(self.populate, out)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def populate(self, porcelain):
+        prev = {row[COL_NAME]: row[COL_SELECTED] for row in self.store}
+        self.store.clear()
+        updates = 0
+        for line in porcelain.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 7:
+                continue
+            name, scope, typ, status, version, url, desc = parts[:7]
+            label, color = STATUS_LABEL.get(status, (status, "#77767b"))
+            if status == "update-available":
+                updates += 1
+            markup = f'<span foreground="{color}">{GLib.markup_escape_text(label)}</span>'
+            self.store.append([prev.get(name, False), name, typ, scope, version, markup, desc, url])
+        n = len(self.store)
+        msg = f"{n} app(s) — {updates} update(s) available" if n else \
+              "No apps configured — add repos with:  nova add <git-url>  [--system]"
+        self.set_busy(False, msg)
+        return False
+
+    # ---- actions ----------------------------------------------------------
+    def run_action(self, verb):
+        if self.busy:
+            return
+        apps = self.selected_apps()
+        if not apps:
+            self.status_label.set_text("Select at least one app first.")
+            return
+
+        names = [a[0] for a in apps]
+        if verb == "uninstall":
+            dlg = Gtk.MessageDialog(
+                transient_for=self, modal=True,
+                message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.OK_CANCEL,
+                text=f"Uninstall {len(names)} app(s)?",
+                secondary_text=", ".join(names),
+            )
+            resp = dlg.run()
+            dlg.destroy()
+            if resp != Gtk.ResponseType.OK:
+                return
+
+        cmd = [self.nova, verb] + names
+        self.log_expander.set_expanded(True)
+        self.append_log(f"\n$ {' '.join(shlex.quote(c) for c in cmd)}\n")
+        self.set_busy(True, f"Running {verb} for {len(names)} app(s)…")
+
+        def worker():
+            try:
+                # system apps trigger pkexec inside nova (no tty here)
+                self.proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                )
+                for line in self.proc.stdout:
+                    GLib.idle_add(self.append_log, line)
+                rc = self.proc.wait()
+            except Exception as e:  # noqa: BLE001
+                GLib.idle_add(self.append_log, f"error: {e}\n")
+                rc = 1
+            finally:
+                self.proc = None
+
+            def done():
+                self.append_log(f"[{verb} finished with exit code {rc}]\n")
+                self.set_busy(False, "Done." if rc == 0 else f"{verb} failed (exit {rc}) — see log.")
+                self.refresh()
+                return False
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
+class NovaApp(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID)
+
+    def do_activate(self):
+        win = self.get_active_window()
+        if not win:
+            nova = find_nova()
+            if not nova:
+                dlg = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR,
+                                        buttons=Gtk.ButtonsType.CLOSE,
+                                        text="nova CLI not found",
+                                        secondary_text="Install nova-updater first (install.sh).")
+                dlg.run()
+                dlg.destroy()
+                self.quit()
+                return
+            win = NovaWindow(self, nova)
+        win.present()
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    raise SystemExit(NovaApp().run(None))

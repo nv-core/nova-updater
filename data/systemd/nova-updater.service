@@ -1,0 +1,9 @@
+[Unit]
+Description=Nova Updater — auto-update user apps
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/nova update --all --user --quiet --notify
+Nice=10
+IOSchedulingClass=idle
