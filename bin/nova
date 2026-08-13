@@ -10,8 +10,12 @@
 #   system — listed in /etc/nova-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-NOVA_VERSION="0.5.0"
+NOVA_VERSION="0.5.1"
 SELF="$(realpath "${BASH_SOURCE[0]}")"
+
+# systemd system services start without $HOME (set -u would abort at the
+# path definitions below) — root's user-scope paths are never used anyway
+export HOME="${HOME:-/root}"
 
 # root-owned copy used for system-scope work (installed by 'install.sh --with-system');
 # escalating to it instead of $SELF means root never executes a user-writable file
