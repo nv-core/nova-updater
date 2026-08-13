@@ -10,7 +10,7 @@
 #   system — listed in /etc/nova-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-NOVA_VERSION="0.3.1"
+NOVA_VERSION="0.3.2"
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 # root-owned copy used for system-scope work (installed by 'install.sh --with-system');
@@ -213,19 +213,24 @@ remote_target() { # url opts -> "sha<TAB>refname"; empty output on failure
     fi
 }
 
-# resolve a user-supplied name to "scope<TAB>url<TAB>opts"; empty if not found
+# resolve a user-supplied name to "scope<TAB>url<TAB>opts"; empty if not found.
+# a name can exist in both scopes (e.g. nova-updater) — first scope wins,
+# --user/--system disambiguates.
 resolve() { # name
-    local scope url opts
+    local scope url opts match="" count=0
     for scope in $(scopes); do
         while IFS=$'\t' read -r url opts; do
             [[ -z $url ]] && continue
             if [[ "$(dir_name "$url")" == "$1" || "$(app_name "$scope" "$url")" == "$1" ]]; then
-                printf '%s\t%s\t%s\n' "$scope" "$url" "$opts"
-                return 0
+                count=$((count+1))
+                [[ -z $match ]] && match="$(printf '%s\t%s\t%s' "$scope" "$url" "$opts")"
+                break
             fi
         done < <(entries "$scope")
     done
-    return 1
+    [[ -n $match ]] || return 1
+    (( count > 1 )) && warn "'$1' exists in both scopes — using ${match%%$'\t'*} scope (use --user/--system to disambiguate)"
+    printf '%s\n' "$match"
 }
 
 acquire_lock() { # scope

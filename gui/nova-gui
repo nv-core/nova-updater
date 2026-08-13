@@ -192,7 +192,9 @@ class NovaWindow(Adw.ApplicationWindow):
         self.logbuf.delete_mark(mark)
 
     def selected(self):
-        return [r.app["name"] for r in self.rows if r.check.get_active()]
+        """Selected apps as (name, scope) — scope matters: the same name can
+        exist in both scopes (e.g. nova-updater itself)."""
+        return [(r.app["name"], r.app["scope"]) for r in self.rows if r.check.get_active()]
 
     def on_select_updates(self, *_):
         for r in self.rows:
@@ -261,13 +263,13 @@ class NovaWindow(Adw.ApplicationWindow):
 
     # ---- actions --------------------------------------------------------------
     def on_uninstall(self, *_):
-        names = self.selected()
-        if not names or self.busy:
-            if not names:
+        sel = self.selected()
+        if not sel or self.busy:
+            if not sel:
                 self.toast("Select at least one app first")
             return
-        dlg = Adw.AlertDialog(heading=f"Uninstall {len(names)} app(s)?",
-                              body=", ".join(names))
+        dlg = Adw.AlertDialog(heading=f"Uninstall {len(sel)} app(s)?",
+                              body=", ".join(f"{n} ({s})" for n, s in sel))
         dlg.add_response("cancel", "Cancel")
         dlg.add_response("remove", "Uninstall")
         dlg.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
@@ -278,26 +280,36 @@ class NovaWindow(Adw.ApplicationWindow):
     def run_action(self, verb):
         if self.busy:
             return
-        names = self.selected()
-        if not names:
+        sel = self.selected()
+        if not sel:
             self.toast("Select at least one app first")
             return
 
-        cmd = [self.nova, verb] + names
+        # one command per scope — the same app name can exist in both scopes,
+        # so the scope flag is what makes the selection unambiguous
+        cmds = []
+        for scope in ("user", "system"):
+            names = [n for n, s in sel if s == scope]
+            if names:
+                cmds.append([self.nova, verb, f"--{scope}"] + names)
+
         self.btn_log.set_active(True)
-        self.append_log(f"\n$ {' '.join(shlex.quote(c) for c in cmd)}\n")
-        self.set_busy(True, f"Running {verb} for {len(names)} app(s)…")
+        self.set_busy(True, f"Running {verb} for {len(sel)} app(s)…")
 
         def worker():
-            try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True, bufsize=1)
-                for line in proc.stdout:
-                    GLib.idle_add(self.append_log, line)
-                rc = proc.wait()
-            except Exception as e:  # noqa: BLE001
-                GLib.idle_add(self.append_log, f"error: {e}\n")
-                rc = 1
+            rc = 0
+            for cmd in cmds:
+                GLib.idle_add(self.append_log,
+                              f"\n$ {' '.join(shlex.quote(c) for c in cmd)}\n")
+                try:
+                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+                    for line in proc.stdout:
+                        GLib.idle_add(self.append_log, line)
+                    rc = proc.wait() or rc
+                except Exception as e:  # noqa: BLE001
+                    GLib.idle_add(self.append_log, f"error: {e}\n")
+                    rc = 1
 
             def done():
                 self.append_log(f"[{verb} finished with exit code {rc}]\n")
