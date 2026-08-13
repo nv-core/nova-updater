@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# nova-system-update — fixed-purpose root wrapper for passwordless system
+# updates. The polkit rule authorizes pkexec of THIS exact path only; it
+# takes no arguments and always runs the same code, so a wheel user starting
+# it can't influence what root does beyond "update all system apps".
+exec /usr/local/bin/nova update --all --system --quiet

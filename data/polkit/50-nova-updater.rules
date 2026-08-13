@@ -1,12 +1,12 @@
-// nova-updater: let local admin users trigger the system update service
-// without a password. The only thing this authorizes is *starting*
-// nova-updater-system.service — root then runs its own fixed update code;
-// no user-controlled arguments are involved. Installs/uninstalls of system
-// apps still require full authentication.
+// nova-updater: let local admin users run the fixed-purpose system-update
+// wrapper without a password. pkexec of exactly this one root-owned program
+// is authorized — it takes no arguments and always runs
+// `nova update --all --system`, so nothing user-controlled reaches root.
+// Passwordless is safe ONLY because /usr/local/libexec/nova-system-update is
+// root-owned and not user-writable. Installs/uninstalls still require auth.
 polkit.addRule(function(action, subject) {
-    if (action.id == "org.freedesktop.systemd1.manage-units" &&
-        action.lookup("unit") == "nova-updater-system.service" &&
-        action.lookup("verb") == "start" &&
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        action.lookup("program") == "/usr/local/libexec/nova-system-update" &&
         subject.isInGroup("wheel") && subject.local && subject.active) {
         return polkit.Result.YES;
     }

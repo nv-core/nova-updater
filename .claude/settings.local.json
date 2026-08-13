@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//var/home/user/Documents/projects/scambert/nova-killswitch/**)",
+      "Bash(python3 -m py_compile gui/nova-killswitch-settings)",
+      "Bash(bash -n backend/nova-killswitch-ctl)",
+      "Bash(bash -n backend/nova-killswitch-monitor)",
+      "Bash(bash -n backend/dispatcher/90-nova-killswitch)"
+    ]
+  }
+}

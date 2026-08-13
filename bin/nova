@@ -10,7 +10,7 @@
 #   system — listed in /etc/nova-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-NOVA_VERSION="0.5.4"
+NOVA_VERSION="0.6.0"
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 # systemd system services start without $HOME (set -u would abort at the
@@ -401,17 +401,18 @@ dispatch() { # verb extra_flag
         esac
     done
 
-    # system UPDATES go through the root service when it exists: passwordless
-    # (polkit rule allows starting this one unit) and root only ever executes
-    # its own fixed code path. install/uninstall still require full auth.
-    if [[ $verb == update && ${#sys_names[@]} -gt 0 && $EUID -ne 0 &&
-          -f /etc/systemd/system/nova-updater-system.service ]]; then
-        info "triggering system update service (updates all system apps)"
-        if systemctl start nova-updater-system.service 2>/dev/null; then
+    # system UPDATES go through a fixed-purpose root wrapper when present:
+    # passwordless for local wheel users (polkit exec rule on that one path),
+    # and root only ever runs `update --all --system`. install/uninstall still
+    # require full auth. Updates are idempotent, so all-at-once is safe.
+    local sys_wrapper=/usr/local/libexec/nova-system-update
+    if [[ $verb == update && ${#sys_names[@]} -gt 0 && $EUID -ne 0 && -x $sys_wrapper ]]; then
+        info "updating all system apps (passwordless root wrapper)"
+        if pkexec "$sys_wrapper"; then
             sys_names=()
-            info "${c_grn}system update service finished${c_off} (details: journalctl -u nova-updater-system.service)"
+            info "${c_grn}system apps updated${c_off}"
         else
-            warn "could not start the system service — falling back to direct escalation"
+            warn "system update wrapper failed — falling back to direct escalation"
         fi
     fi
 

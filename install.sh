@@ -157,6 +157,8 @@ user_uninstall() {
 root_install() {
     say "installing root-owned nova to $SYS_BIN (used by the system timer)"
     install -Dm755 "$SRC/bin/nova" "$SYS_BIN/nova"
+    # fixed-purpose wrapper for passwordless GUI/CLI system updates
+    install -Dm755 "$SRC/data/nova-system-update" /usr/local/libexec/nova-system-update
 
     say "installing system update service"
     install -Dm644 "$SRC/data/systemd/nova-updater-system.service" "$SYS_UNIT_DIR/nova-updater-system.service"
@@ -185,7 +187,7 @@ root_uninstall() {
     rm -f "$SYS_UNIT_DIR/nova-updater-system.service" "$SYS_UNIT_DIR/nova-updater-system.timer" \
           /etc/polkit-1/rules.d/50-nova-updater.rules
     systemctl daemon-reload
-    rm -f "$SYS_BIN/nova"
+    rm -f "$SYS_BIN/nova" /usr/local/libexec/nova-system-update
 
     if (( PURGE )); then
         local other=() d
