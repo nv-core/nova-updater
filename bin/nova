@@ -10,7 +10,7 @@
 #   system — listed in /etc/nova-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-NOVA_VERSION="0.3.2"
+NOVA_VERSION="0.4.0"
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 # root-owned copy used for system-scope work (installed by 'install.sh --with-system');
@@ -386,6 +386,20 @@ dispatch() { # verb extra_flag
             uninstall) uninstall_one "${T_SCOPE[$i]}" "${T_URL[$i]}" "${PURGE:-0}"   || rc=1 ;;
         esac
     done
+
+    # system UPDATES go through the root service when it exists: passwordless
+    # (polkit rule allows starting this one unit) and root only ever executes
+    # its own fixed code path. install/uninstall still require full auth.
+    if [[ $verb == update && ${#sys_names[@]} -gt 0 && $EUID -ne 0 &&
+          -f /etc/systemd/system/nova-updater-system.service ]]; then
+        info "triggering system update service (updates all system apps)"
+        if systemctl start nova-updater-system.service 2>/dev/null; then
+            sys_names=()
+            info "${c_grn}system update service finished${c_off} (details: journalctl -u nova-updater-system.service)"
+        else
+            warn "could not start the system service — falling back to direct escalation"
+        fi
+    fi
 
     if [[ ${#sys_names[@]} -gt 0 ]]; then
         info "escalating for system apps: ${sys_names[*]}"

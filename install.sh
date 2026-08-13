@@ -157,6 +157,11 @@ root_install() {
     systemctl daemon-reload
     systemctl enable --now nova-updater-system.timer
 
+    # wheel users may *start* the update service without a password
+    # (/etc/polkit-1/rules.d is writable on ostree systems)
+    install -Dm644 "$SRC/data/polkit/50-nova-updater.rules" \
+        /etc/polkit-1/rules.d/50-nova-updater.rules
+
     mkdir -p "$SYS_CONF" "$SYS_DATA/repos"
     chmod 755 "$SYS_DATA" "$SYS_DATA/repos"
     seed_list "$SYS_CONF/apps.list"     "nova system apps — installed as root; options: branch=<b> ref=<tag>"
@@ -170,7 +175,8 @@ root_update() { root_install; }
 root_uninstall() {
     say "removing system service and root-owned nova"
     systemctl disable --now nova-updater-system.timer 2>/dev/null || true
-    rm -f "$SYS_UNIT_DIR/nova-updater-system.service" "$SYS_UNIT_DIR/nova-updater-system.timer"
+    rm -f "$SYS_UNIT_DIR/nova-updater-system.service" "$SYS_UNIT_DIR/nova-updater-system.timer" \
+          /etc/polkit-1/rules.d/50-nova-updater.rules
     systemctl daemon-reload
     rm -f "$SYS_BIN/nova"
 
