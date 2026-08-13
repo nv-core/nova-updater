@@ -85,8 +85,10 @@ user_install() {
 
     say "installing desktop entry"
     mkdir -p "$USER_APPS"
+    # file name must match the GTK application id for GNOME Shell association
     sed "s|^Exec=.*|Exec=$USER_BIN/nova-gui|" "$SRC/data/nova-gui.desktop" \
-        > "$USER_APPS/nova-gui.desktop"
+        > "$USER_APPS/org.novanetwork.NovaUpdater.desktop"
+    rm -f "$USER_APPS/nova-gui.desktop"   # pre-0.2 name
 
     say "installing user update service"
     install -Dm644 "$SRC/data/systemd/nova-updater.service" "$USER_UNIT_DIR/nova-updater.service"
@@ -110,7 +112,8 @@ user_uninstall() {
     systemctl --user disable --now nova-updater.timer 2>/dev/null || true
     rm -f "$USER_UNIT_DIR/nova-updater.service" "$USER_UNIT_DIR/nova-updater.timer"
     systemctl --user daemon-reload
-    rm -f "$USER_BIN/nova" "$USER_BIN/nova-gui" "$USER_APPS/nova-gui.desktop"
+    rm -f "$USER_BIN/nova" "$USER_BIN/nova-gui" \
+          "$USER_APPS/org.novanetwork.NovaUpdater.desktop" "$USER_APPS/nova-gui.desktop"
     if (( PURGE )); then
         say "purging $USER_CONF and $USER_DATA"
         rm -rf "$USER_CONF" "$USER_DATA"

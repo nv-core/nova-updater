@@ -7,7 +7,7 @@ Nova Core Team. Apps are plain GitHub repos that follow a tiny convention
 keeps them updated in the background — including itself.
 
 - **`nova`** — lightweight bash CLI (needs only `git` + coreutils)
-- **`nova-gui`** — GTK3 GUI (Python), multi-select install/update/uninstall
+- **`nova-gui`** — GTK4/libadwaita GUI (Python, GNOME 40+), multi-select install/update/uninstall
 - **releases follow git tags** — apps update to the latest version tag;
   untagged pushes don't trigger updates (repos without tags follow HEAD)
 - **catalogs** — a shared git repo can provide the app list (+ version pins),
