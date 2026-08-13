@@ -70,12 +70,18 @@ class AppRow(Adw.ActionRow):
             icon.set_tooltip_text(app["typ"])
             icon.add_css_class("dim-label")
             self.add_suffix(icon)
-        if "(cli-only)" in app["typ"]:
-            tag = Gtk.Label(label="cli-only")
-            tag.add_css_class("caption")
-            tag.add_css_class("dim-label")
-            tag.set_tooltip_text("GUI parts were not installed on this machine (headless)")
-            self.add_suffix(tag)
+
+        # cli+gui apps: a per-row toggle to install the GUI parts or stay
+        # cli-only. Defaults to the current flavor (cli-only tag => off).
+        self.gui_toggle = None
+        if "gui" in base_typ and base_typ != "cli":
+            self.gui_toggle = Gtk.ToggleButton(
+                icon_name="application-x-executable-symbolic",
+                valign=Gtk.Align.CENTER,
+                tooltip_text="Install GUI parts (off = CLI only)")
+            self.gui_toggle.add_css_class("flat")
+            self.gui_toggle.set_active("(cli-only)" not in app["typ"])
+            self.add_suffix(self.gui_toggle)
 
         if app["ver"] and app["ver"] != "-":
             ver = Gtk.Label(label=app["ver"])
@@ -200,10 +206,15 @@ class NovaWindow(Adw.ApplicationWindow):
         self.logbuf.delete_mark(mark)
 
     def selected(self):
-        """Selected apps as (name, scope, status) — scope matters (the same
-        name can exist in both scopes) and status picks install vs update."""
-        return [(r.app["name"], r.app["scope"], r.app["status"])
-                for r in self.rows if r.check.get_active()]
+        """Selected apps as (name, scope, status, gui) — scope disambiguates
+        same-named apps, status picks install vs update, gui is the per-row
+        flavor choice (None if not a cli+gui app)."""
+        out = []
+        for r in self.rows:
+            if r.check.get_active():
+                gui = None if r.gui_toggle is None else r.gui_toggle.get_active()
+                out.append((r.app["name"], r.app["scope"], r.app["status"], gui))
+        return out
 
     def on_select_updates(self, *_):
         for r in self.rows:
@@ -278,7 +289,7 @@ class NovaWindow(Adw.ApplicationWindow):
                 self.toast("Select at least one app first")
             return
         dlg = Adw.AlertDialog(heading=f"Uninstall {len(sel)} app(s)?",
-                              body=", ".join(f"{n} ({s})" for n, s, _ in sel))
+                              body=", ".join(f"{n} ({s})" for n, s, _, _ in sel))
         dlg.add_response("cancel", "Cancel")
         dlg.add_response("remove", "Uninstall")
         dlg.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
@@ -294,22 +305,28 @@ class NovaWindow(Adw.ApplicationWindow):
             self.toast("Select at least one app first")
             return
 
-        # one command per scope and per real verb. Installed apps get "update"
-        # (system updates then run passwordless via the root service); only
-        # genuinely new apps get "install" (system installs prompt by design).
+        # Build commands grouped by (scope, real-verb, gui-flavor). Installed
+        # apps get "update" (system updates run passwordless via the wrapper);
+        # new apps get "install" (system installs prompt by design). The gui
+        # flavor (--gui/--cli-only) is only meaningful for install/update.
         cmds = []
-        for scope in ("user", "system"):
-            if verb == "uninstall":
-                names = [n for n, s, _ in sel if s == scope]
+        if verb == "uninstall":
+            for scope in ("user", "system"):
+                names = [n for n, s, _, _ in sel if s == scope]
                 if names:
                     cmds.append([self.nova, "uninstall", f"--{scope}"] + names)
-                continue
-            new = [n for n, s, st in sel if s == scope and st == "not-installed"]
-            upd = [n for n, s, st in sel if s == scope and st != "not-installed"]
-            if new:
-                cmds.append([self.nova, "install", f"--{scope}"] + new)
-            if upd:
-                cmds.append([self.nova, "update", f"--{scope}"] + upd)
+        else:
+            # group key: (scope, verb, gui-flag)
+            groups = {}
+            for n, s, st, gui in sel:
+                real = "install" if st == "not-installed" else "update"
+                flag = None if gui is None else ("--gui" if gui else "--cli-only")
+                groups.setdefault((s, real, flag), []).append(n)
+            for (scope, real, flag), names in groups.items():
+                cmd = [self.nova, real, f"--{scope}"]
+                if flag:
+                    cmd.append(flag)
+                cmds.append(cmd + names)
 
         self.btn_log.set_active(True)
         self.set_busy(True, f"Running {verb} for {len(sel)} app(s)…")
