@@ -166,10 +166,11 @@ root_install() {
     systemctl daemon-reload
     systemctl enable --now nova-updater-system.timer
 
-    # wheel users may *start* the update service without a password
+    # wheel users may run the system-update wrapper without a password
     # (/etc/polkit-1/rules.d is writable on ostree systems)
     install -Dm644 "$SRC/data/polkit/50-nova-updater.rules" \
         /etc/polkit-1/rules.d/50-nova-updater.rules
+    systemctl reload polkit 2>/dev/null || systemctl restart polkit 2>/dev/null || true
 
     mkdir -p "$SYS_CONF" "$SYS_DATA/repos"
     chmod 755 "$SYS_DATA" "$SYS_DATA/repos"
