@@ -4,10 +4,13 @@
 // `nova update --all --system`, so nothing user-controlled reaches root.
 // Passwordless is safe ONLY because /usr/local/libexec/nova-system-update is
 // root-owned and not user-writable. Installs/uninstalls still require auth.
+// We intentionally do NOT require subject.local: VM consoles and some desktop
+// sessions report non-local, which caused password prompts. Safe because the
+// target is root-owned, not user-writable, and takes no arguments.
 polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.policykit.exec" &&
         action.lookup("program") == "/usr/local/libexec/nova-system-update" &&
-        subject.isInGroup("wheel") && subject.local && subject.active) {
+        subject.isInGroup("wheel") && subject.active) {
         return polkit.Result.YES;
     }
 });
