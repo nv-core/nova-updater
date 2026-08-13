@@ -10,7 +10,7 @@
 #   system — listed in /etc/nova-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-NOVA_VERSION="0.2.0"
+NOVA_VERSION="0.3.0"
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 # root-owned copy used for system-scope work (installed by 'install.sh --with-system');
@@ -233,6 +233,18 @@ acquire_lock() { # scope
     flock -n 9 || die "another nova instance is already running ($1 scope)"
 }
 
+# 1 if the machine has a GTK4 stack (desktop), 0 on headless/server installs.
+# Deliberately NOT based on $DISPLAY — ssh sessions to desktops have none.
+gui_available() {
+    [[ -n ${NOVA_GUI:-} ]] && { echo "$NOVA_GUI"; return; }
+    if [[ -e /usr/lib64/girepository-1.0/Gtk-4.0.typelib ||
+          -e /usr/lib/girepository-1.0/Gtk-4.0.typelib ]]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
 run_installer() { # scope repo_dir action
     local scope="$1" dir="$2" action="$3"
     local inst; inst="$(manifest_get "$dir" INSTALLER install.sh)"
@@ -243,6 +255,7 @@ run_installer() { # scope repo_dir action
           NOVA_ACTION="$action" \
           NOVA_APP_DIR="$dir" \
           NOVA_PREFIX="$(prefix_for "$scope")" \
+          NOVA_GUI="$(gui_available)" \
           bash "./$inst" "$action" )
 }
 
@@ -495,7 +508,23 @@ cmd_catalog() { # add <url> | list      (--system routes to the system file)
         list)
             catalog_urls
             ;;
-        *) die "usage: nova catalog add <git-url> [--system] | nova catalog list" ;;
+        remove)
+            local url="${1:-}"
+            [[ -n $url ]] || die "usage: nova catalog remove <git-url> [--system]"
+            local f="$USER_CATALOGS"
+            [[ $SCOPE_FILTER == system ]] && f="$SYS_CATALOGS"
+            if [[ $f == "$SYS_CATALOGS" && $EUID -ne 0 ]]; then
+                as_root "$(root_nova)" catalog remove "$url" --system
+                return
+            fi
+            [[ -f $f ]] && grep -qF "$url" "$f" || die "not registered in $f"
+            local tmp; tmp="$(mktemp)"
+            grep -vF "$url" "$f" > "$tmp" || true
+            cat "$tmp" > "$f"; rm -f "$tmp"
+            rm -rf "$(catalogs_dir)/$(dir_name "$url")"
+            info "catalog removed (installed apps stay until uninstalled)"
+            ;;
+        *) die "usage: nova catalog add|remove <git-url> [--system] | nova catalog list" ;;
     esac
 }
 
@@ -520,7 +549,7 @@ ${c_bold}commands:${c_off}
   list [--check] [--porcelain]   list all apps (--check also queries remotes)
   check                          check for updates (exit 10 if any)
   add <git-url> [--system]       add a repo to the user or system app list
-  catalog add <git-url>|list     register a catalog repo (shared app list)
+  catalog add|remove <url>|list  manage catalog repos (shared app lists)
   sync                           refresh all registered catalogs
   install <name...|--all>        clone + run the app's installer
   update  [name...|--all]        fetch + reinstall apps that changed [--force]

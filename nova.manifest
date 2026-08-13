@@ -1,7 +1,7 @@
 # nova.manifest — app metadata for the nova updater (this file *is* the convention)
 NAME=nova-updater
 DESCRIPTION=Git-based installer/updater for Nova Network tools (CLI + GTK4 GUI)
-VERSION=0.2.0
+VERSION=0.3.0
 TYPE=cli
 SCOPE=user
 INSTALLER=install.sh

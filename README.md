@@ -46,6 +46,11 @@ The desktop entry lands in `~/.local/share/applications`, so **Nova Updater**
 shows up in the GNOME app grid. Requires `git` on the host (in the base image
 on Silverblue/Bluefin).
 
+**Headless machines**: GUI parts (nova-gui, desktop entries) are skipped
+automatically when no GTK4 stack is present; force with `--cli-only` or
+`NOVA_GUI=0`. nova exports `NOVA_GUI` to every app installer, so all Nova
+Network tools make the same cli/gui decision with one installer.
+
 ### Why the split layout? (Silverblue-safe *and* secure)
 
 | piece | location | why |
@@ -84,9 +89,12 @@ file they're in).
 
 ## Catalogs — the git-workflowed master list
 
-A catalog is a plain git repo containing an `apps.list`. Register it once
-(`nova catalog add <url>`); nova syncs it before every check/update. Local
-`apps.list` entries always win over catalog entries.
+A catalog is a plain git repo containing an `apps.list`. The **official
+[nv-core/nova-catalog](https://github.com/nv-core/nova-catalog) is registered
+automatically at install** — community or personal catalogs can be added with
+`nova catalog add <url>` (and dropped with `catalog remove`). nova syncs all
+of them before every check/update. Local `apps.list` entries always win over
+catalog entries.
 
 ```
 # nova-catalog/apps.list

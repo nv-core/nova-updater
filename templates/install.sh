@@ -27,8 +27,11 @@ do_install() {
     install -Dm755 "$SRC/bin/$APP" "$NOVA_PREFIX/bin/$APP"
 
     # --- GTK GUI example (uncomment) ---------------------------------------
-    # install -Dm755 "$SRC/gui/$APP-gui" "$NOVA_PREFIX/bin/$APP-gui"
-    # install -Dm644 "$SRC/data/$APP.desktop" "$NOVA_PREFIX/share/applications/$APP.desktop"
+    # nova exports NOVA_GUI=0 on headless machines — skip GUI parts then:
+    # if [[ "${NOVA_GUI:-1}" == 1 ]]; then
+    #     install -Dm755 "$SRC/gui/$APP-gui" "$NOVA_PREFIX/bin/$APP-gui"
+    #     install -Dm644 "$SRC/data/$APP.desktop" "$NOVA_PREFIX/share/applications/$APP.desktop"
+    # fi
 
     # --- GNOME extension example (SCOPE=user, TYPE=gnome-extension) --------
     # UUID="my-ext@nova-network"

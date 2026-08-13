@@ -23,13 +23,29 @@ SELF="$SRC/install.sh"
 ACTION="${1:-install}"
 PURGE=0
 WITH_SYSTEM=0
+CLI_ONLY=0
 for arg in "${@:2}"; do
     case "$arg" in
         --purge)       PURGE=1 ;;
         --with-system) WITH_SYSTEM=1 ;;
+        --cli-only)    CLI_ONLY=1 ;;
         *) echo "unknown option: $arg" >&2; exit 1 ;;
     esac
 done
+
+# the official catalog, preregistered on every install
+DEFAULT_CATALOG="https://github.com/nv-core/nova-catalog.git"
+
+# GUI parts are skipped on headless machines (no GTK4 stack), with
+# --cli-only / NOVA_GUI=0 as explicit overrides. Not based on $DISPLAY —
+# ssh sessions to desktop machines have none.
+want_gui() {
+    (( CLI_ONLY )) && return 1
+    [[ ${NOVA_GUI:-} == 0 ]] && return 1
+    [[ -n ${NOVA_GUI:-} ]] && return 0
+    [[ -e /usr/lib64/girepository-1.0/Gtk-4.0.typelib ||
+       -e /usr/lib/girepository-1.0/Gtk-4.0.typelib ]]
+}
 
 USER_BIN="$HOME/.local/bin"
 USER_APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
@@ -79,16 +95,20 @@ system_present() {
 
 # ---------------- user phase (default, no root) -------------------------------
 user_install() {
-    say "installing nova + nova-gui to $USER_BIN"
-    install -Dm755 "$SRC/bin/nova"     "$USER_BIN/nova"
-    install -Dm755 "$SRC/gui/nova-gui" "$USER_BIN/nova-gui"
+    say "installing nova to $USER_BIN"
+    install -Dm755 "$SRC/bin/nova" "$USER_BIN/nova"
 
-    say "installing desktop entry"
-    mkdir -p "$USER_APPS"
-    # file name must match the GTK application id for GNOME Shell association
-    sed "s|^Exec=.*|Exec=$USER_BIN/nova-gui|" "$SRC/data/nova-gui.desktop" \
-        > "$USER_APPS/org.novanetwork.NovaUpdater.desktop"
-    rm -f "$USER_APPS/nova-gui.desktop"   # pre-0.2 name
+    if want_gui; then
+        say "installing nova-gui + desktop entry"
+        install -Dm755 "$SRC/gui/nova-gui" "$USER_BIN/nova-gui"
+        mkdir -p "$USER_APPS"
+        # file name must match the GTK application id for GNOME Shell association
+        sed "s|^Exec=.*|Exec=$USER_BIN/nova-gui|" "$SRC/data/nova-gui.desktop" \
+            > "$USER_APPS/org.novanetwork.NovaUpdater.desktop"
+        rm -f "$USER_APPS/nova-gui.desktop"   # pre-0.2 name
+    else
+        say "no GTK4 stack (or --cli-only) — skipping GUI"
+    fi
 
     say "installing user update service"
     install -Dm644 "$SRC/data/systemd/nova-updater.service" "$USER_UNIT_DIR/nova-updater.service"
@@ -99,6 +119,10 @@ user_install() {
     mkdir -p "$USER_CONF" "$USER_DATA/repos"
     seed_list "$USER_CONF/apps.list"     "nova user apps — one git URL per line; options: branch=<b> ref=<tag>"
     seed_list "$USER_CONF/catalogs.list" "nova catalogs — git URLs of catalog repos (shared app lists)"
+    grep -qF "$DEFAULT_CATALOG" "$USER_CONF/catalogs.list" || {
+        echo "$DEFAULT_CATALOG" >> "$USER_CONF/catalogs.list"
+        say "registered default catalog ($DEFAULT_CATALOG)"
+    }
     register_self "$USER_CONF/apps.list" "$USER_DATA/repos"
 
     say "done — try: nova list  |  nova add <git-url>  |  nova-gui"
@@ -137,6 +161,7 @@ root_install() {
     chmod 755 "$SYS_DATA" "$SYS_DATA/repos"
     seed_list "$SYS_CONF/apps.list"     "nova system apps — installed as root; options: branch=<b> ref=<tag>"
     seed_list "$SYS_CONF/catalogs.list" "nova system catalogs — git URLs of catalog repos"
+    grep -qF "$DEFAULT_CATALOG" "$SYS_CONF/catalogs.list" || echo "$DEFAULT_CATALOG" >> "$SYS_CONF/catalogs.list"
     register_self "$SYS_CONF/apps.list" "$SYS_DATA/repos"
 }
 
@@ -167,7 +192,7 @@ root_uninstall() {
 
 # ---------------- dispatch ------------------------------------------------------
 case "$ACTION" in install|update|uninstall) ;; *)
-    echo "usage: $0 install|update|uninstall [--purge] [--with-system]" >&2; exit 1 ;;
+    echo "usage: $0 install|update|uninstall [--purge] [--with-system] [--cli-only]" >&2; exit 1 ;;
 esac
 
 if [[ $EUID -eq 0 ]]; then
