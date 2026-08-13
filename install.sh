@@ -99,13 +99,15 @@ user_install() {
     install -Dm755 "$SRC/bin/nova" "$USER_BIN/nova"
 
     if want_gui; then
-        say "installing nova-gui + desktop entry"
+        say "installing nova-gui + desktop entry + icon"
         install -Dm755 "$SRC/gui/nova-gui" "$USER_BIN/nova-gui"
         mkdir -p "$USER_APPS"
         # file name must match the GTK application id for GNOME Shell association
         sed "s|^Exec=.*|Exec=$USER_BIN/nova-gui|" "$SRC/data/nova-gui.desktop" \
             > "$USER_APPS/org.novanetwork.NovaUpdater.desktop"
         rm -f "$USER_APPS/nova-gui.desktop"   # pre-0.2 name
+        install -Dm644 "$SRC/data/icons/org.novanetwork.NovaUpdater.svg" \
+            "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/org.novanetwork.NovaUpdater.svg"
     else
         say "no GTK4 stack (or --cli-only) — skipping GUI"
     fi
@@ -137,7 +139,8 @@ user_uninstall() {
     rm -f "$USER_UNIT_DIR/nova-updater.service" "$USER_UNIT_DIR/nova-updater.timer"
     systemctl --user daemon-reload
     rm -f "$USER_BIN/nova" "$USER_BIN/nova-gui" \
-          "$USER_APPS/org.novanetwork.NovaUpdater.desktop" "$USER_APPS/nova-gui.desktop"
+          "$USER_APPS/org.novanetwork.NovaUpdater.desktop" "$USER_APPS/nova-gui.desktop" \
+          "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/org.novanetwork.NovaUpdater.svg"
     if (( PURGE )); then
         say "purging $USER_CONF and $USER_DATA"
         rm -rf "$USER_CONF" "$USER_DATA"
